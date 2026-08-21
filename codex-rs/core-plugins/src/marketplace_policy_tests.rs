@@ -56,6 +56,43 @@ fn config_layer_stack_with_user_config(
         .expect("build config layer stack")
 }
 
+fn config_layer_stack_with_layers(layers: Vec<ConfigLayerEntry>) -> ConfigLayerStack {
+    ConfigLayerStack::new(
+        layers,
+        codex_config::ConfigRequirements::default(),
+        codex_config::ConfigRequirementsToml::default(),
+    )
+    .expect("build config layer stack")
+}
+
+fn user_layer(codex_home: &Path, contents: &str) -> ConfigLayerEntry {
+    ConfigLayerEntry::new(
+        ConfigLayerSource::User {
+            file: AbsolutePathBuf::try_from(codex_home.join("config.toml"))
+                .expect("absolute user config path"),
+            profile: None,
+        },
+        toml::from_str(contents).expect("parse user config"),
+    )
+}
+
+fn project_layer(project_root: &Path, contents: &str) -> ConfigLayerEntry {
+    ConfigLayerEntry::new(
+        ConfigLayerSource::Project {
+            dot_codex_folder: AbsolutePathBuf::try_from(project_root.join(".codex"))
+                .expect("absolute project config path"),
+        },
+        toml::from_str(contents).expect("parse project config"),
+    )
+}
+
+fn plugin_enabled_states(stack: &ConfigLayerStack, codex_home: &Path) -> HashMap<String, bool> {
+    configured_plugins_from_stack(stack, codex_home)
+        .into_iter()
+        .map(|(name, config)| (name, config.enabled))
+        .collect()
+}
+
 fn parse_source(source: &str, ref_name: Option<&str>) -> MarketplaceSource {
     parse_marketplace_source(source, ref_name.map(str::to_string)).expect("parse source")
 }
@@ -528,6 +565,117 @@ enabled = true
     let raw = stack.effective_user_config().expect("raw user config");
     assert!(raw["marketplaces"]["blocked"].is_table());
     assert!(raw["plugins"]["sample@blocked"].is_table());
+}
+
+#[test]
+fn trusted_project_plugin_config_overrides_user_config_in_both_directions() {
+    let codex_home = TempDir::new().expect("create Codex home");
+    let project_root = codex_home.path().join("project");
+
+    for (user_enabled, project_enabled) in [(false, true), (true, false)] {
+        let stack = config_layer_stack_with_layers(vec![
+            user_layer(
+                codex_home.path(),
+                &format!("[plugins.\"foo@example\"]\nenabled = {user_enabled}\n"),
+            ),
+            project_layer(
+                &project_root,
+                &format!("[plugins.\"foo@example\"]\nenabled = {project_enabled}\n"),
+            ),
+        ]);
+
+        assert_eq!(
+            plugin_enabled_states(&stack, codex_home.path()),
+            HashMap::from([("foo@example".to_string(), project_enabled)])
+        );
+    }
+}
+
+#[test]
+fn plugin_config_is_scoped_to_the_active_project_layer_stack() {
+    let codex_home = TempDir::new().expect("create Codex home");
+    let user = || {
+        user_layer(
+            codex_home.path(),
+            r#"
+[plugins."foo@example"]
+enabled = false
+
+[plugins."bar@example"]
+enabled = false
+"#,
+        )
+    };
+    let project_a = config_layer_stack_with_layers(vec![
+        user(),
+        project_layer(
+            &codex_home.path().join("project-a"),
+            r#"
+[plugins."foo@example"]
+enabled = true
+"#,
+        ),
+    ]);
+    let project_b = config_layer_stack_with_layers(vec![
+        user(),
+        project_layer(
+            &codex_home.path().join("project-b"),
+            r#"
+[plugins."bar@example"]
+enabled = true
+"#,
+        ),
+    ]);
+    let outside_project = config_layer_stack_with_layers(vec![user()]);
+
+    assert_eq!(
+        plugin_enabled_states(&project_a, codex_home.path()),
+        HashMap::from([
+            ("foo@example".to_string(), true),
+            ("bar@example".to_string(), false),
+        ])
+    );
+    assert_eq!(
+        plugin_enabled_states(&project_b, codex_home.path()),
+        HashMap::from([
+            ("foo@example".to_string(), false),
+            ("bar@example".to_string(), true),
+        ])
+    );
+    assert_eq!(
+        plugin_enabled_states(&outside_project, codex_home.path()),
+        HashMap::from([
+            ("foo@example".to_string(), false),
+            ("bar@example".to_string(), false),
+        ])
+    );
+}
+
+#[test]
+fn untrusted_project_plugin_config_is_ignored() {
+    let codex_home = TempDir::new().expect("create Codex home");
+    let project_root = codex_home.path().join("untrusted-project");
+    let untrusted_project = ConfigLayerEntry::new_disabled(
+        ConfigLayerSource::Project {
+            dot_codex_folder: AbsolutePathBuf::try_from(project_root.join(".codex"))
+                .expect("absolute project config path"),
+        },
+        toml::from_str("[plugins.\"foo@example\"]\nenabled = true\n")
+            .expect("parse project config"),
+        "project is untrusted",
+    );
+    let stack = config_layer_stack_with_layers(vec![
+        user_layer(
+            codex_home.path(),
+            "[plugins.\"foo@example\"]\nenabled = false\n",
+        ),
+        untrusted_project,
+    ]);
+
+    assert_eq!(
+        plugin_enabled_states(&stack, codex_home.path()),
+        HashMap::from([("foo@example".to_string(), false)])
+    );
 }
 
 #[test]

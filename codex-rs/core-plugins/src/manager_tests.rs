@@ -6614,7 +6614,7 @@ fn refresh_non_curated_plugin_cache_continues_after_plugin_error() {
 }
 
 #[tokio::test]
-async fn load_plugins_ignores_project_config_files() {
+async fn load_plugins_applies_trusted_project_plugin_config() {
     let codex_home = TempDir::new().unwrap();
     let project_root = codex_home.path().join("project");
     let plugin_root = codex_home
@@ -6627,20 +6627,42 @@ async fn load_plugins_ignores_project_config_files() {
         r#"{"name":"sample"}"#,
     );
     write_file(
-        &project_root.join(".codex/config.toml"),
-        &plugin_config_toml(/*enabled*/ true, /*plugins_feature_enabled*/ true),
+        &plugin_root.join("skills/example/SKILL.md"),
+        "---\nname: example\ndescription: example skill\n---\n",
+    );
+    write_file(
+        &plugin_root.join(".mcp.json"),
+        r#"{"mcpServers":{"example":{"command":"echo"}}}"#,
+    );
+    write_file(
+        &plugin_root.join("hooks/hooks.json"),
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo startup"}]}]}}"#,
     );
 
     let stack = ConfigLayerStack::new(
-        vec![ConfigLayerEntry::new(
-            ConfigLayerSource::Project {
-                dot_codex_folder: AbsolutePathBuf::try_from(project_root.join(".codex")).unwrap(),
-            },
-            toml::from_str(&plugin_config_toml(
-                /*enabled*/ true, /*plugins_feature_enabled*/ true,
-            ))
-            .expect("project config should parse"),
-        )],
+        vec![
+            ConfigLayerEntry::new(
+                ConfigLayerSource::User {
+                    file: AbsolutePathBuf::try_from(codex_home.path().join(CONFIG_TOML_FILE))
+                        .unwrap(),
+                    profile: None,
+                },
+                toml::from_str(&plugin_config_toml(
+                    /*enabled*/ false, /*plugins_feature_enabled*/ true,
+                ))
+                .expect("user config should parse"),
+            ),
+            ConfigLayerEntry::new(
+                ConfigLayerSource::Project {
+                    dot_codex_folder: AbsolutePathBuf::try_from(project_root.join(".codex"))
+                        .unwrap(),
+                },
+                toml::from_str(&plugin_config_toml(
+                    /*enabled*/ true, /*plugins_feature_enabled*/ true,
+                ))
+                .expect("project config should parse"),
+            ),
+        ],
         ConfigRequirements::default(),
         ConfigRequirementsToml::default(),
     )
@@ -6657,7 +6679,13 @@ async fn load_plugins_ignores_project_config_files() {
     )
     .await;
 
-    assert_eq!(plugins, Vec::new());
+    assert_eq!(plugins.len(), 1);
+    let plugin = &plugins[0];
+    assert!(plugin.enabled);
+    assert_eq!(plugin.error, None);
+    assert!(!plugin.skill_roots.is_empty());
+    assert!(!plugin.mcp_servers.is_empty());
+    assert!(!plugin.hook_sources.is_empty());
 }
 
 #[tokio::test]
