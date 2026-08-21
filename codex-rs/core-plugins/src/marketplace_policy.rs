@@ -212,6 +212,15 @@ pub(crate) fn project_effective_user_config(
     codex_home: &Path,
 ) -> Option<toml::Value> {
     let mut user_config = config_layer_stack.effective_user_config()?;
+    if let Some(effective_plugins) = config_layer_stack
+        .effective_config()
+        .get("plugins")
+        .cloned()
+    {
+        user_config
+            .as_table_mut()?
+            .insert("plugins".to_string(), effective_plugins);
+    }
     let policy = MarketplacePolicy::from_requirements(config_layer_stack.requirements());
     let allowed_marketplace_names =
         allowed_configured_marketplace_names_with_policy(&user_config, &policy, codex_home);
